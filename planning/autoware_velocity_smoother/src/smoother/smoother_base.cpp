@@ -341,6 +341,35 @@ TrajectoryPoints SmootherBase::applyLateralAccelerationFilter(
   return output;
 }
 
+double SmootherBase::calculateFrontSteeringAngle4WS(
+  const double curvature) const
+{
+  const double ratio = base_param_.rear_steering_ratio;
+  const double wheel_base = base_param_.wheel_base;
+
+  auto calculate_curvature = [&](const double front_steer) {
+    const double rear_steer = ratio * front_steer;
+
+    return (std::tan(front_steer) - std::tan(rear_steer)) / wheel_base;
+  };
+
+  // realistic steering range (~34 degrees)
+  double low = -0.6;
+  double high = 0.6;
+
+  for (size_t i = 0; i < 50; ++i) {
+    const double mid = (low + high) / 2.0;
+
+    if (calculate_curvature(mid) < curvature) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+
+  return (low + high) / 2.0;
+}
+
 TrajectoryPoints SmootherBase::applySteeringRateLimit(
   const TrajectoryPoints & input, const bool use_resampling,
   const double input_points_interval) const
@@ -377,12 +406,26 @@ TrajectoryPoints SmootherBase::applySteeringRateLimit(
 
 
     // calculate front steering angle
-    steer_front =
-      std::atan(base_param_.wheel_base * curvature_v.at(i + 1));
+    if (base_param_.enable_4ws) {
 
-    steer_back =
-      std::atan(base_param_.wheel_base * curvature_v.at(i));
+      steer_front =
+        calculateFrontSteeringAngle4WS(
+          curvature_v.at(i + 1));
 
+      steer_back =
+        calculateFrontSteeringAngle4WS(
+          curvature_v.at(i));
+
+    } else {
+
+      steer_front =
+        std::atan(
+          base_param_.wheel_base * curvature_v.at(i + 1));
+
+      steer_back =
+        std::atan(
+          base_param_.wheel_base * curvature_v.at(i));
+    }
 
     // calculate rear steering angle for 4WS
     if (base_param_.enable_4ws) {
@@ -400,7 +443,24 @@ TrajectoryPoints SmootherBase::applySteeringRateLimit(
 
     }
 
-    const auto steering_diff = std::fabs(steer_front - steer_back);
+    double steering_diff;
+
+    if (base_param_.enable_4ws) {
+
+      const auto steering_front =
+        steer_front - rear_steer_front;
+
+      const auto steering_back =
+        steer_back - rear_steer_back;
+
+      steering_diff =
+        std::fabs(steering_front - steering_back);
+
+    } else {
+
+      steering_diff =
+        std::fabs(steer_front - steer_back);
+    }
 
     steer_rate_velocity_ratio_arr.at(i) =
       steering_diff / (points_interval + std::numeric_limits<double>::epsilon());

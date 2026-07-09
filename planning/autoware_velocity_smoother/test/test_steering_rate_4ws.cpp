@@ -107,11 +107,20 @@ void checkSteeringOutput(
     }
 
     if (expect_rear) {
+
       EXPECT_NEAR(
         point.rear_wheel_angle_rad,
         rear_ratio * point.front_wheel_angle_rad,
         1e-3);
+
+      // 4WS counter phase check
+      EXPECT_LT(
+        point.front_wheel_angle_rad *
+        point.rear_wheel_angle_rad,
+        0.0);
+
     } else {
+
       EXPECT_NEAR(
         point.rear_wheel_angle_rad,
         0.0,
