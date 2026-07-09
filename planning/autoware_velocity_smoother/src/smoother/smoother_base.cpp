@@ -97,6 +97,8 @@ SmootherBase::SmootherBase(
   p.resample_param.sparse_resample_dt = node.declare_parameter<double>("sparse_resample_dt");
   p.resample_param.sparse_min_interval_distance =
     node.declare_parameter<double>("sparse_min_interval_distance");
+  p.enable_4ws = node.declare_parameter<bool>("enable_4ws", false);
+  p.rear_steering_ratio = node.declare_parameter<double>("rear_steering_ratio", 0.0);
 }
 
 void SmootherBase::setWheelBase(const double wheel_base)
@@ -365,13 +367,38 @@ TrajectoryPoints SmootherBase::applySteeringRateLimit(
   // Step2. Calculate steer rate for each trajectory point.
   std::vector<double> steer_rate_velocity_ratio_arr(output.size());
   for (size_t i = 0; i < output.size() - 1; i++) {
-    // steer
+    // front steering
     auto & steer_front = output.at(i + 1).front_wheel_angle_rad;
     auto & steer_back = output.at(i).front_wheel_angle_rad;
 
-    // calculate the just 2 steering angle
-    steer_front = std::atan(base_param_.wheel_base * curvature_v.at(i + 1));
-    steer_back = std::atan(base_param_.wheel_base * curvature_v.at(i));
+    // rear steering
+    auto & rear_steer_front = output.at(i + 1).rear_wheel_angle_rad;
+    auto & rear_steer_back = output.at(i).rear_wheel_angle_rad;
+
+
+    // calculate front steering angle
+    steer_front =
+      std::atan(base_param_.wheel_base * curvature_v.at(i + 1));
+
+    steer_back =
+      std::atan(base_param_.wheel_base * curvature_v.at(i));
+
+
+    // calculate rear steering angle for 4WS
+    if (base_param_.enable_4ws) {
+
+      rear_steer_front =
+        base_param_.rear_steering_ratio * steer_front;
+
+      rear_steer_back =
+        base_param_.rear_steering_ratio * steer_back;
+
+    } else {
+
+      rear_steer_front = 0.0;
+      rear_steer_back = 0.0;
+
+    }
 
     const auto steering_diff = std::fabs(steer_front - steer_back);
 

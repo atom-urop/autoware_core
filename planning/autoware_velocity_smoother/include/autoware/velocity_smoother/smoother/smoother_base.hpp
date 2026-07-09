@@ -51,6 +51,8 @@ public:
     std::vector<double> velocity_thresholds;          // velocity thresholds [m/s]
     std::vector<double> steering_angle_rate_limits;   // steering angle rate limits [degree/s]
     double wheel_base;                                // wheel base [m]
+    bool enable_4ws{false};                           // enable 4WS extension
+    double rear_steering_ratio{0.0};                  // rear/front steering ratio [-]
     double sample_ds;                                 // distance between trajectory points [m]
     double curvature_threshold;  // look-up distance of Trajectory point for calculation of steering
                                  // angle limit [m]
