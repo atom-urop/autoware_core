@@ -66,6 +66,13 @@ if(BUILD_TESTING)
   target_link_libraries(test_${PROJECT_NAME}
     ${PROJECT_NAME}_node
   )
+  ament_add_ros_isolated_gtest(test_steering_rate_4ws
+    test/test_steering_rate_4ws.cpp
+  )
+
+  target_link_libraries(test_steering_rate_4ws
+    smoother
+    )
 endif()
 
 
