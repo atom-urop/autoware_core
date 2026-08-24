@@ -51,6 +51,10 @@ public:
     std::vector<double> velocity_thresholds;          // velocity thresholds [m/s]
     std::vector<double> steering_angle_rate_limits;   // steering angle rate limits [degree/s]
     double wheel_base;                                // wheel base [m]
+    std::vector<double> k_ref_lut;                                  //The curve look-up table values
+    std::vector<double> rr_lut;                                     //The ratio at each curve value loop-up table
+    bool enable_4ws{false};                                  //Boolean Enabler to activate the 4ws    
+    std::vector<double> delta_f_lut;                                //Front angle for a curve
     double sample_ds;                                 // distance between trajectory points [m]
     double curvature_threshold;  // look-up distance of Trajectory point for calculation of steering
                                  // angle limit [m]
