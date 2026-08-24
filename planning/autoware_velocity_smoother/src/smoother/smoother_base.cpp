@@ -330,6 +330,11 @@ TrajectoryPoints SmootherBase::applyLateralAccelerationFilter(
     }
     double v_curvature_max = computeVelocityLimitFromLateralAcc(
       curvature, lateral_acceleration_velocity_square_ratio_limits);
+    if (base_param_.enable_4ws){ //NEW FOR OUR 4WS IMPLEMENTATION CONSIDERRING sqrt( a × cos(δr) / k )=sqrt( a × cos / k )  =  sqrt( a / k )  ×  sqrt( cos )
+      const double rear_angle = output.at(i).rear_wheel_angle_rad;
+      const double cos_r = std::max(std::cos(rear_angle),0.0);
+      v_curvature_max *= std::sqrt(cos_r);
+    }  
     v_curvature_max = std::max(v_curvature_max, base_param_.min_curve_velocity);
 
     if (enable_smooth_limit) {
