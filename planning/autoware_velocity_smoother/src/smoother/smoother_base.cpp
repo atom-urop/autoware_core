@@ -100,7 +100,7 @@ SmootherBase::SmootherBase(
   p.enable_4ws = node.declare_parameter<bool>("enable_4ws", false);
   p.k_ref_lut = node.declare_parameter<std::vector<double>>("k_ref_lut", std::vector<double>{});
   p.rr_lut = node.declare_parameter<std::vector<double>>("rr_lut", std::vector<double>{});
-  p.delta_f_lut = node.declare_parameter<std::vector<double>>("delta_f__lut", std::vector<double>{});
+  p.delta_f_lut = node.declare_parameter<std::vector<double>>("delta_f_lut", std::vector<double>{});
 }
 
 void SmootherBase::setWheelBase(const double wheel_base)
