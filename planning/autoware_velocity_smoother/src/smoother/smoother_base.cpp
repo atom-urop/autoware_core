@@ -19,6 +19,7 @@
 #include "autoware/motion_utils/trajectory/trajectory.hpp"
 #include "autoware/velocity_smoother/resample.hpp"
 #include "autoware/velocity_smoother/trajectory_utils.hpp"
+#include "autoware/interpolation/linear_interpolation.hpp"
 
 #include <autoware_utils_geometry/geometry.hpp>
 #include <autoware_utils_math/unit_conversion.hpp>
@@ -335,6 +336,7 @@ TrajectoryPoints SmootherBase::applyLateralAccelerationFilter(
       const double cos_r = std::max(std::cos(rear_angle),0.0);
       v_curvature_max *= std::sqrt(cos_r);
     }  
+
     v_curvature_max = std::max(v_curvature_max, base_param_.min_curve_velocity);
 
     if (enable_smooth_limit) {
@@ -371,7 +373,7 @@ TrajectoryPoints SmootherBase::applySteeringRateLimit(
   // Step1. Calculate curvature assuming the trajectory points interval is constant.
   const auto curvature_v = trajectory_utils::calcTrajectoryCurvatureFrom3Points(output, idx_dist);
 
-  // Step2. Calculate steer rate for each trajectory point.
+  /* // Step2. Calculate steer rate for each trajectory point.
   std::vector<double> steer_rate_velocity_ratio_arr(output.size());
   for (size_t i = 0; i < output.size() - 1; i++) {
     // steer
@@ -386,6 +388,69 @@ TrajectoryPoints SmootherBase::applySteeringRateLimit(
 
     steer_rate_velocity_ratio_arr.at(i) =
       steering_diff / (points_interval + std::numeric_limits<double>::epsilon());
+  }*/ //2WS autoware original implementation
+    // Step2. Calculate steer rate for each trajectory point.
+  // 4WS: split into two passes, mirroring ComputeSteeringRateAngle4WS.m.
+  //   Pass 1 fills both wheel angles; Pass 2 derives the rate ratio.
+  // Stock Autoware did both in one loop, which wrote every point twice.
+  std::vector<double> steer_rate_velocity_ratio_arr(output.size());
+
+  // --- Step2-1. Fill front and rear steering angles for every point. ---
+  for (size_t i = 0; i < output.size(); i++) {
+    const double k_signed = curvature_v.at(i);
+
+    // The LUT is magnitude-only (k_ref_lut spans 0 .. k_max), so query on
+    // |curvature| and restore the turn direction afterwards. This matches
+    // Autoware's own fabs() convention on curvature used in Step4 below.
+    const double k_abs = std::fabs(k_signed);
+    const double s = (k_signed > 0.0) ? 1.0 : ((k_signed < 0.0) ? -1.0 : 0.0);
+
+    double rr_i = 0.0;     // rear-to-front steering ratio at this curvature
+    double front_i = 0.0;  // front wheel angle [rad]
+
+    if (base_param_.enable_4ws) {
+      if (k_abs > base_param_.k_ref_lut.back()) {
+        // Beyond the table: saturate at its last row. Read from the LUT
+        // rather than hardcoding, so the clamp cannot drift from the table
+        // if it is ever regenerated.
+        rr_i = base_param_.rr_lut.back();
+        front_i = s * base_param_.delta_f_lut.back();
+      } else {
+        // C++ equivalent of MATLAB interp1(). NOTE: lerp throws
+        // std::invalid_argument if the query is outside base_keys, unlike
+        // interp1 which returns NaN. The k_abs + guard above keeps every
+        // query inside the table's domain.
+        rr_i = autoware::interpolation::lerp(
+          base_param_.k_ref_lut, base_param_.rr_lut, k_abs);
+        front_i = s * autoware::interpolation::lerp(
+          base_param_.k_ref_lut, base_param_.delta_f_lut, k_abs);
+      }
+    } else {
+      // 2WS fallback: identical to stock Autoware. Keeps behaviour unchanged
+      // while enable_4ws is false.
+      front_i = std::atan(base_param_.wheel_base * k_signed);
+      rr_i = 0.0;
+    }
+
+    // Populate the trajectory message. front_wheel_angle_rad was already
+    // written by stock Autoware; rear_wheel_angle_rad was left at 0 and is
+    // read by applyLateralAccelerationFilter's cosine correction.
+    output.at(i).front_wheel_angle_rad = static_cast<float>(front_i);
+    output.at(i).rear_wheel_angle_rad = static_cast<float>(rr_i * front_i);
+  }
+
+  // --- Step2-2. Steering rate from whichever axle must move further. ---
+  // 4WS has two independent actuators; the binding constraint is the larger
+  // angular change, not the sum or difference.
+  for (size_t i = 0; i + 1 < output.size(); i++) {
+    const double front_diff = std::fabs(
+      output.at(i + 1).front_wheel_angle_rad - output.at(i).front_wheel_angle_rad);
+    const double rear_diff = std::fabs(
+      output.at(i + 1).rear_wheel_angle_rad - output.at(i).rear_wheel_angle_rad);
+
+    steer_rate_velocity_ratio_arr.at(i) =
+      std::max(front_diff, rear_diff) /
+      (points_interval + std::numeric_limits<double>::epsilon());
   }
 
   steer_rate_velocity_ratio_arr.back() = steer_rate_velocity_ratio_arr.at((output.size() - 2));

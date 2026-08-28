@@ -122,6 +122,7 @@ public:
   double computeVelocityLimitFromSteerRate(
     const double local_steer_rate_velocity_ratio,
     const std::vector<std::pair<double, double>> steer_rate_velocity_ratio_limits) const;
+    std::pair<double, double> calculateSteeringAngles4WS(const double curvature) const; //added for 4WS
 
 protected:
   BaseParam base_param_;
