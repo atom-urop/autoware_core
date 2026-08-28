@@ -331,11 +331,23 @@ TrajectoryPoints SmootherBase::applyLateralAccelerationFilter(
     }
     double v_curvature_max = computeVelocityLimitFromLateralAcc(
       curvature, lateral_acceleration_velocity_square_ratio_limits);
-    if (base_param_.enable_4ws){ //NEW FOR OUR 4WS IMPLEMENTATION CONSIDERRING sqrt( a × cos(δr) / k )=sqrt( a × cos / k )  =  sqrt( a / k )  ×  sqrt( cos )
-      const double rear_angle = output.at(i).rear_wheel_angle_rad;
-      const double cos_r = std::max(std::cos(rear_angle),0.0);
+    if (base_param_.enable_4ws) {
+      // Look up the rear angle from the LUT directly, rather than reading
+      // rear_wheel_angle_rad, which is not populated until
+      // applySteeringRateLimit runs later in the pipeline.
+      double rear_angle = 0.0;
+      if (curvature > base_param_.k_ref_lut.back()) {
+        rear_angle = base_param_.rr_lut.back() * base_param_.delta_f_lut.back();
+      } else {
+        const double rr_i = autoware::interpolation::lerp(
+          base_param_.k_ref_lut, base_param_.rr_lut, curvature);
+        const double front_i = autoware::interpolation::lerp(
+          base_param_.k_ref_lut, base_param_.delta_f_lut, curvature);
+        rear_angle = rr_i * front_i;
+      }
+      const double cos_r = std::max(std::cos(rear_angle), 0.0);
       v_curvature_max *= std::sqrt(cos_r);
-    }  
+    }
 
     v_curvature_max = std::max(v_curvature_max, base_param_.min_curve_velocity);
 
@@ -389,7 +401,8 @@ TrajectoryPoints SmootherBase::applySteeringRateLimit(
     steer_rate_velocity_ratio_arr.at(i) =
       steering_diff / (points_interval + std::numeric_limits<double>::epsilon());
   }*/ //2WS autoware original implementation
-    // Step2. Calculate steer rate for each trajectory point.
+
+  // Step2. Calculate steer rate for each trajectory point.
   // 4WS: split into two passes, mirroring ComputeSteeringRateAngle4WS.m.
   //   Pass 1 fills both wheel angles; Pass 2 derives the rate ratio.
   // Stock Autoware did both in one loop, which wrote every point twice.
