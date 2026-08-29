@@ -427,6 +427,48 @@ TEST_F(TestSmootherBase, DumpNinetyDegreeLeftTurnCritical)
   EXPECT_EQ(out.size(), N);
 }
 
+TEST_F(TestSmootherBase, LateralAccFilterCosineCorrection)
+{
+  auto smoother = std::dynamic_pointer_cast<SmootherBase>(smoother_base);
+  auto params = smoother->getBaseParam();
+  params.k_ref_lut = node->get_parameter("k_ref_lut").as_double_array();
+  params.rr_lut = node->get_parameter("rr_lut").as_double_array();
+  params.delta_f_lut = node->get_parameter("delta_f_lut").as_double_array();
+  params.curvature_calculation_distance = 1.0;
+  params.min_curve_velocity = 0.1;   // lowered so the floor doesn't mask the effect
+
+  // Circular arc, curvature 0.3 -> inside the LUT's interpolation range.
+  const double ds = 0.1;
+  const size_t n = 120;
+  const double radius = 1.0 / 0.3;
+  TrajectoryPoints traj;
+  for (size_t i = 0; i < n; ++i) {
+    const double theta = (static_cast<double>(i) * ds) / radius;
+    autoware_planning_msgs::msg::TrajectoryPoint p;
+    p.pose.position.x = radius * std::sin(theta);
+    p.pose.position.y = radius * (1.0 - std::cos(theta));
+    p.longitudinal_velocity_mps = 10.0;   // high, so the lateral acc limit binds
+    traj.push_back(p);
+  }
+
+  params.enable_4ws = false;
+  smoother->setParam(params);
+  const auto out_2ws = smoother->applyLateralAccelerationFilter(traj, 10.0, 0.0, false, false, ds);
+
+  params.enable_4ws = true;
+  smoother->setParam(params);
+  const auto out_4ws = smoother->applyLateralAccelerationFilter(traj, 10.0, 0.0, false, false, ds);
+
+  const size_t mid = out_2ws.size() / 2;
+  const double v2 = out_2ws.at(mid).longitudinal_velocity_mps;
+  const double v4 = out_4ws.at(mid).longitudinal_velocity_mps;
+  std::cout << "2WS v=" << v2 << "  4WS v=" << v4
+            << "  ratio=" << (v2 > 0 ? v4 / v2 : 0.0) << "\n";
+
+  // cos(delta_r) < 1, so the 4WS limit must be lower, not higher.
+  EXPECT_LT(v4, v2);
+  EXPECT_GT(v4, 0.0);
+}
 
 int main(int argc, char ** argv)
 {
