@@ -14,17 +14,22 @@
 
 #include "autoware/velocity_smoother/smoother/jerk_filtered_smoother.hpp"
 #include "autoware/velocity_smoother/smoother/smoother_base.hpp"
+#include "autoware/velocity_smoother/trajectory_utils.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <limits>
 #include <memory>
 #include <vector>
+#include <fstream>
+#include <iostream>
 
 using autoware::velocity_smoother::JerkFilteredSmoother;
 using autoware::velocity_smoother::SmootherBase;
+using autoware::velocity_smoother::TrajectoryPoints;
 
 // Test fixture to create a SmootherBase instance with controlled parameters
 class TestSmootherBase : public ::testing::Test
@@ -48,6 +53,9 @@ protected:
        "--params-file", velocity_smoother_dir + "/config/default_common.param.yaml",
        "--params-file", velocity_smoother_dir + "/config/JerkFiltered.param.yaml"});
     node = std::make_shared<rclcpp::Node>("test_smoother_base_node", node_options);
+    debug_processing_time_detail_ =
+      node->create_publisher<autoware_utils_debug::ProcessingTimeDetail>(
+        "~/debug/processing_time_detail_ms", 1);//3 lines added
 
     auto time_keeper =
       std::make_shared<autoware_utils_debug::TimeKeeper>(debug_processing_time_detail_);
@@ -211,6 +219,214 @@ TEST_F(TestSmootherBase, ComputeVelocityLimitFromSteerRate)
   velocity_limit = smoother_base->computeVelocityLimitFromSteerRate(steer_rate_ratio, limits);
   EXPECT_NEAR(velocity_limit, 25.0, 1e-10);
 }
+
+TEST_F(TestSmootherBase, FourWheelSteeringProducesValidAngles)
+{
+  auto smoother = std::dynamic_pointer_cast<SmootherBase>(smoother_base);
+  auto params = smoother->getBaseParam();
+
+  // SetUp's setParam() overwrites BaseParam with a hand-built struct, so the
+  // LUTs loaded from the YAML are lost there - but they remain declared on
+  // the node, so recover them from the parameters.
+  params.enable_4ws = true;
+  params.k_ref_lut = node->get_parameter("k_ref_lut").as_double_array();
+  params.rr_lut = node->get_parameter("rr_lut").as_double_array();
+  params.delta_f_lut = node->get_parameter("delta_f_lut").as_double_array();
+  params.curvature_calculation_distance = 1.0;
+  smoother->setParam(params);
+
+  ASSERT_FALSE(params.k_ref_lut.empty());
+  ASSERT_EQ(params.k_ref_lut.size(), params.rr_lut.size());
+  ASSERT_EQ(params.k_ref_lut.size(), params.delta_f_lut.size());
+
+  const double ds = 0.1;
+  const size_t n = 80;
+  const size_t mid = 40;
+
+  // Points on a circle of radius R have curvature exactly 1/R, which injects
+  // a known curvature through an interface that computes its own.
+  auto make_arc = [&](const double kappa) {
+    TrajectoryPoints traj;
+    const double radius = 1.0 / std::abs(kappa);
+    const double sgn = (kappa > 0.0) ? 1.0 : -1.0;
+    for (size_t i = 0; i < n; ++i) {
+      const double theta = (static_cast<double>(i) * ds) / radius;
+      autoware_planning_msgs::msg::TrajectoryPoint p;
+      p.pose.position.x = radius * std::sin(theta);
+      p.pose.position.y = sgn * radius * (1.0 - std::cos(theta));
+      p.longitudinal_velocity_mps = 5.0;
+      traj.push_back(p);
+    }
+    return traj;
+  };
+
+  // use_resampling = false keeps the points exactly where we placed them.
+  const auto left = smoother->applySteeringRateLimit(make_arc(0.3), false, ds);
+  const auto right = smoother->applySteeringRateLimit(make_arc(-0.3), false, ds);
+
+  const double fl = left.at(mid).front_wheel_angle_rad;
+  const double rl = left.at(mid).rear_wheel_angle_rad;
+  const double fr = right.at(mid).front_wheel_angle_rad;
+  const double rr = right.at(mid).rear_wheel_angle_rad;
+
+  EXPECT_GT(std::abs(fl), 1e-6);          // the LUT produced a real angle
+  EXPECT_LT(fl * rl, 0.0);                // rear counter-phases front
+  EXPECT_LE(std::abs(fl), 0.7 + 1e-6);    // within the steering limit
+  EXPECT_LE(std::abs(rl), 0.7 + 1e-6);
+  EXPECT_NEAR(fl, -fr, 1e-4);             // right mirrors left
+  EXPECT_NEAR(rl, -rr, 1e-4);
+}
+
+TEST_F(TestSmootherBase, DumpFourWheelSteeringSweep)
+{
+  auto smoother = std::dynamic_pointer_cast<SmootherBase>(smoother_base);
+  auto params = smoother->getBaseParam();
+  params.enable_4ws = true;
+  params.k_ref_lut = node->get_parameter("k_ref_lut").as_double_array();
+  params.rr_lut = node->get_parameter("rr_lut").as_double_array();
+  params.delta_f_lut = node->get_parameter("delta_f_lut").as_double_array();
+  params.curvature_calculation_distance = 1.0;
+  smoother->setParam(params);
+
+  const double ds = 0.1;
+  const size_t n = 600;
+
+  // Curvature sweep: 0 -> +0.6 -> 0 -> -0.6 -> 0.
+  // Covers the full LUT domain and both turn directions.
+  auto kappa_at = [&](size_t i) {
+    const double t = static_cast<double>(i) / static_cast<double>(n);
+    return 0.6 * std::sin(2.0 * M_PI * t);
+  };
+
+  // Integrate heading to build the path from the demanded curvature.
+  TrajectoryPoints traj;
+  double x = 0.0, y = 0.0, th = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    autoware_planning_msgs::msg::TrajectoryPoint p;
+    p.pose.position.x = x;
+    p.pose.position.y = y;
+    p.longitudinal_velocity_mps = 5.0;
+    traj.push_back(p);
+    th += kappa_at(i) * ds;
+    x += ds * std::cos(th);
+    y += ds * std::sin(th);
+  }
+
+  const auto out = smoother->applySteeringRateLimit(traj, false, ds);
+
+  std::ofstream f("/tmp/cpp_4ws_sweep.csv");
+  f << "i,x,y,kappa_demanded,front_rad,rear_rad,velocity\n";
+  for (size_t i = 0; i < out.size(); ++i) {
+    f << i << ","
+      << out.at(i).pose.position.x << ","
+      << out.at(i).pose.position.y << ","
+      << kappa_at(i) << ","
+      << out.at(i).front_wheel_angle_rad << ","
+      << out.at(i).rear_wheel_angle_rad << ","
+      << out.at(i).longitudinal_velocity_mps << "\n";
+  }
+  f.close();
+  std::cout << "wrote /tmp/cpp_4ws_sweep.csv with " << out.size() << " rows\n";
+
+  EXPECT_EQ(out.size(), n);
+}
+
+TEST_F(TestSmootherBase, DumpNinetyDegreeLeftTurnCritical)
+{
+  auto smoother = std::dynamic_pointer_cast<SmootherBase>(smoother_base);
+  auto params = smoother->getBaseParam();
+  params.enable_4ws = true;
+  params.k_ref_lut = node->get_parameter("k_ref_lut").as_double_array();
+  params.rr_lut = node->get_parameter("rr_lut").as_double_array();
+  params.delta_f_lut = node->get_parameter("delta_f_lut").as_double_array();
+  params.curvature_calculation_distance = 1.0;
+  smoother->setParam(params);
+
+  // --- Direct port of the Simulink MATLAB Function
+  // "Trajectory Generator: 90 deg left turn critical for 2WS" (chart_317).
+  // Values kept identical to the model, including R = 1 (note: the block
+  // title says R = 2.5 m, which disagrees with the code).
+  constexpr size_t N = 100;
+  constexpr size_t N1 = 30;   // first straight
+  constexpr size_t N2 = 40;   // circular arc
+  constexpr size_t N3 = 30;   // second straight
+  constexpr double R = 1.0;
+  constexpr double L1 = 2.0;
+  constexpr double L2 = 15.0;
+  const double v = 4.0 / 3.6;
+
+  TrajectoryPoints traj(N);
+  for (auto & p : traj) {
+    p.longitudinal_velocity_mps = static_cast<float>(v);
+  }
+
+  auto set_yaw = [](autoware_planning_msgs::msg::TrajectoryPoint & p, const double yaw) {
+    p.pose.orientation.z = std::sin(yaw / 2.0);
+    p.pose.orientation.w = std::cos(yaw / 2.0);
+  };
+
+  for (size_t i = 0; i < N1; ++i) {
+    const double t = static_cast<double>(i) / static_cast<double>(N1 - 1);
+    traj.at(i).pose.position.x = t * L1;
+    traj.at(i).pose.position.y = 0.0;
+    set_yaw(traj.at(i), 0.0);
+  }
+
+  const double cx = L1;
+  const double cy = R;
+  for (size_t k = 0; k < N2; ++k) {
+    const double theta =
+      -M_PI / 2.0 + (M_PI / 2.0) * static_cast<double>(k) / static_cast<double>(N2 - 1);
+    const size_t i = N1 + k;
+    traj.at(i).pose.position.x = cx + R * std::cos(theta);
+    traj.at(i).pose.position.y = cy + R * std::sin(theta);
+    set_yaw(traj.at(i), theta + M_PI / 2.0);
+  }
+
+  const double x0 = traj.at(N1 + N2 - 1).pose.position.x;
+  const double y0 = traj.at(N1 + N2 - 1).pose.position.y;
+  for (size_t k = 1; k <= N3; ++k) {
+    const double t = static_cast<double>(k) / static_cast<double>(N3);
+    const size_t i = N1 + N2 + k - 1;
+    traj.at(i).pose.position.x = x0;
+    traj.at(i).pose.position.y = y0 + t * L2;
+    set_yaw(traj.at(i), M_PI / 2.0);
+  }
+
+  // NOTE: check the "input_points_interval [m]" constant in the Simulink
+  // velocity_smoother_node block and set this to the same value.
+  const double points_interval = 0.1;
+
+  const auto out = smoother->applySteeringRateLimit(traj, false, points_interval);
+
+  const size_t idx_dist = static_cast<size_t>(
+    std::max(static_cast<int>(params.curvature_calculation_distance / points_interval), 1));
+  const auto kappa =
+    autoware::velocity_smoother::trajectory_utils::calcTrajectoryCurvatureFrom3Points(
+      out, idx_dist);
+
+  std::ofstream f("/tmp/cpp_90deg_critical.csv");
+  f << "i,segment,x,y,spacing,kappa_autoware,front_rad,rear_rad,rr_effective,velocity\n";
+  for (size_t i = 0; i < out.size(); ++i) {
+    const double fr = out.at(i).front_wheel_angle_rad;
+    const double re = out.at(i).rear_wheel_angle_rad;
+    const double sp =
+      (i == 0) ? 0.0
+               : std::hypot(
+                   out.at(i).pose.position.x - out.at(i - 1).pose.position.x,
+                   out.at(i).pose.position.y - out.at(i - 1).pose.position.y);
+    const char * seg = (i < N1) ? "straight1" : ((i < N1 + N2) ? "arc" : "straight2");
+    f << i << "," << seg << "," << out.at(i).pose.position.x << ","
+      << out.at(i).pose.position.y << "," << sp << "," << kappa.at(i) << "," << fr << ","
+      << re << "," << (std::fabs(fr) > 1e-9 ? re / fr : 0.0) << ","
+      << out.at(i).longitudinal_velocity_mps << "\n";
+  }
+  f.close();
+  std::cout << "wrote /tmp/cpp_90deg_critical.csv (" << out.size() << " rows)\n";
+
+  EXPECT_EQ(out.size(), N);
+}
+
 
 int main(int argc, char ** argv)
 {
