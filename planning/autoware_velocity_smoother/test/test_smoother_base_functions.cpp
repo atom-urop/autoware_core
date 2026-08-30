@@ -76,7 +76,7 @@ protected:
     params.decel_distance_before_curve = 3.0;
     params.decel_distance_after_curve = 2.0;
     params.min_curve_velocity = 2.0;
-    params.wheel_base = 2.7;
+    params.wheel_base = 2.0;   // ATOM vehicle, matches the LUT
     params.resample_param.max_trajectory_length = 200.0;
     params.resample_param.min_trajectory_length = 30.0;
     params.resample_param.resample_time = 0.1;
@@ -468,6 +468,91 @@ TEST_F(TestSmootherBase, LateralAccFilterCosineCorrection)
   // cos(delta_r) < 1, so the 4WS limit must be lower, not higher.
   EXPECT_LT(v4, v2);
   EXPECT_GT(v4, 0.0);
+}
+
+TEST_F(TestSmootherBase, Compare2WSvs4WSFullPipeline)
+{
+  auto smoother = std::dynamic_pointer_cast<SmootherBase>(smoother_base);
+  auto params = smoother->getBaseParam();
+  params.k_ref_lut = node->get_parameter("k_ref_lut").as_double_array();
+  params.rr_lut = node->get_parameter("rr_lut").as_double_array();
+  params.delta_f_lut = node->get_parameter("delta_f_lut").as_double_array();
+  params.curvature_calculation_distance = 1.0;
+
+  // Raise the input speed and drop the floor so the curve-speed limits
+  // actually bind. At the Simulink speed (4 km/h = 1.111 m/s) both runs sit
+  // on min_curve_velocity and the velocity columns would be identical.
+  const double v_in = 10.0;
+  params.min_curve_velocity = 0.1;
+
+  // --- Trajectory: port of Simulink chart_317, 90 deg left turn ---
+  constexpr size_t N = 100, N1 = 30, N2 = 40, N3 = 30;
+  constexpr double R = 1.0, L1 = 2.0, L2 = 15.0;
+
+  TrajectoryPoints traj(N);
+  for (auto & p : traj) p.longitudinal_velocity_mps = static_cast<float>(v_in);
+
+  for (size_t i = 0; i < N1; ++i) {
+    traj.at(i).pose.position.x = (static_cast<double>(i) / (N1 - 1)) * L1;
+    traj.at(i).pose.position.y = 0.0;
+  }
+  for (size_t k = 0; k < N2; ++k) {
+    const double th = -M_PI / 2.0 + (M_PI / 2.0) * static_cast<double>(k) / (N2 - 1);
+    traj.at(N1 + k).pose.position.x = L1 + R * std::cos(th);
+    traj.at(N1 + k).pose.position.y = R + R * std::sin(th);
+  }
+  const double x0 = traj.at(N1 + N2 - 1).pose.position.x;
+  const double y0 = traj.at(N1 + N2 - 1).pose.position.y;
+  for (size_t k = 1; k <= N3; ++k) {
+    traj.at(N1 + N2 + k - 1).pose.position.x = x0;
+    traj.at(N1 + N2 + k - 1).pose.position.y =
+      y0 + (static_cast<double>(k) / N3) * L2;
+  }
+
+  const double ds = 0.1;
+
+  // Same order as node.cpp: lateral acc filter, then steering rate limit.
+  auto run = [&](const bool four_ws) {
+    params.enable_4ws = four_ws;
+    smoother->setParam(params);
+    const auto a = smoother->applyLateralAccelerationFilter(traj, v_in, 0.0, false, false, ds);
+    return smoother->applySteeringRateLimit(a, false, ds);
+  };
+
+  const auto out2 = run(false);
+  const auto out4 = run(true);
+  ASSERT_EQ(out2.size(), out4.size());
+
+  const size_t idx_dist = static_cast<size_t>(
+    std::max(static_cast<int>(params.curvature_calculation_distance / ds), 1));
+  const auto kappa =
+    autoware::velocity_smoother::trajectory_utils::calcTrajectoryCurvatureFrom3Points(
+      out4, idx_dist);
+
+  std::ofstream f("/tmp/cpp_2ws_vs_4ws.csv");
+  f << "i,segment,x,y,kappa,"
+       "front_2ws,rear_2ws,vel_2ws,"
+       "front_4ws,rear_4ws,vel_4ws,"
+       "d_front,d_vel,vel_ratio\n";
+  for (size_t i = 0; i < out2.size(); ++i) {
+    const double f2 = out2.at(i).front_wheel_angle_rad;
+    const double r2 = out2.at(i).rear_wheel_angle_rad;
+    const double v2 = out2.at(i).longitudinal_velocity_mps;
+    const double f4 = out4.at(i).front_wheel_angle_rad;
+    const double r4 = out4.at(i).rear_wheel_angle_rad;
+    const double v4 = out4.at(i).longitudinal_velocity_mps;
+    const char * seg = (i < N1) ? "straight1" : ((i < N1 + N2) ? "arc" : "straight2");
+    f << i << "," << seg << "," << out4.at(i).pose.position.x << ","
+      << out4.at(i).pose.position.y << "," << kappa.at(i) << ","
+      << f2 << "," << r2 << "," << v2 << ","
+      << f4 << "," << r4 << "," << v4 << ","
+      << (f4 - f2) << "," << (v4 - v2) << ","
+      << (v2 > 1e-9 ? v4 / v2 : 1.0) << "\n";
+  }
+  f.close();
+  std::cout << "wrote /tmp/cpp_2ws_vs_4ws.csv (" << out2.size() << " rows)\n";
+
+  EXPECT_EQ(out2.size(), N);
 }
 
 int main(int argc, char ** argv)
