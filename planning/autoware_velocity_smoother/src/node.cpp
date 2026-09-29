@@ -200,6 +200,7 @@ rcl_interfaces::msg::SetParametersResult VelocitySmootherNode::onParameter(
 
   {
     auto p = smoother_->getBaseParam();
+    update_param_bool("enable_4ws", p.enable_4ws);
     update_param("normal.max_acc", p.max_accel);
     update_param("normal.min_acc", p.min_decel);
     update_param("stop_decel", p.stop_decel);
@@ -513,6 +514,18 @@ void VelocitySmootherNode::onCurrentTrajectory(const Trajectory::ConstSharedPtr 
     output, current_odometry_ptr_->twist.twist.linear.x, current_odometry_ptr_->pose.pose,
     node_param_.ego_nearest_dist_threshold, node_param_.ego_nearest_yaw_threshold,
     node_param_.post_resample_param, false);
+
+
+  if (smoother_->getBaseParam().enable_4ws) {
+    for (auto & point : output_resampled) {
+      const double yaw_mpt = tf2::getYaw(point.pose.orientation);
+      const double yaw_body = yaw_mpt - point.rear_wheel_angle_rad;
+
+      tf2::Quaternion q;
+      q.setRPY(0.0, 0.0, yaw_body);
+      point.pose.orientation = tf2::toMsg(q);
+    }
+  }
 
   // Set 0 at the end of the trajectory
   if (!output_resampled.empty()) {

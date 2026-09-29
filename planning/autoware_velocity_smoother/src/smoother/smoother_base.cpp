@@ -332,19 +332,9 @@ TrajectoryPoints SmootherBase::applyLateralAccelerationFilter(
     double v_curvature_max = computeVelocityLimitFromLateralAcc(
       curvature, lateral_acceleration_velocity_square_ratio_limits);
     if (base_param_.enable_4ws) {
-      // Look up the rear angle from the LUT directly, rather than reading
-      // rear_wheel_angle_rad, which is not populated until
-      // applySteeringRateLimit runs later in the pipeline.
-      double rear_angle = 0.0;
-      if (curvature > base_param_.k_ref_lut.back()) {
-        rear_angle = base_param_.rr_lut.back() * base_param_.delta_f_lut.back();
-      } else {
-        const double rr_i = autoware::interpolation::lerp(
-          base_param_.k_ref_lut, base_param_.rr_lut, curvature);
-        const double front_i = autoware::interpolation::lerp(
-          base_param_.k_ref_lut, base_param_.delta_f_lut, curvature);
-        rear_angle = rr_i * front_i;
-      }
+      const double rear_angle =
+        static_cast<double>(output.at(i).rear_wheel_angle_rad);
+
       const double cos_r = std::max(std::cos(rear_angle), 0.0);
       v_curvature_max *= std::sqrt(cos_r);
     }
@@ -408,50 +398,19 @@ TrajectoryPoints SmootherBase::applySteeringRateLimit(
   // Stock Autoware did both in one loop, which wrote every point twice.
   std::vector<double> steer_rate_velocity_ratio_arr(output.size());
 
-  // --- Step2-1. Fill front and rear steering angles for every point. ---
-  for (size_t i = 0; i < output.size(); i++) {
-    const double k_signed = curvature_v.at(i);
+  // --- Step2-1. Fill steering angles for 2WS.
+  // For 4WS, preserve the steering angles provided by the path optimizer. ---
+  if (!base_param_.enable_4ws) {
+    for (size_t i = 0; i < output.size(); i++) {
+      const double k_signed = curvature_v.at(i);
 
-    // The LUT is magnitude-only (k_ref_lut spans 0 .. k_max), so query on
-    // |curvature| and restore the turn direction afterwards. This matches
-    // Autoware's own fabs() convention on curvature used in Step4 below.
-    const double k_abs = std::fabs(k_signed);
-    const double s = (k_signed > 0.0) ? 1.0 : ((k_signed < 0.0) ? -1.0 : 0.0);
+      output.at(i).front_wheel_angle_rad =
+        static_cast<float>(std::atan(base_param_.wheel_base * k_signed));
 
-    double rr_i = 0.0;     // rear-to-front steering ratio at this curvature
-    double front_i = 0.0;  // front wheel angle [rad]
-
-    if (base_param_.enable_4ws) {
-      if (k_abs > base_param_.k_ref_lut.back()) {
-        // Beyond the table: saturate at its last row. Read from the LUT
-        // rather than hardcoding, so the clamp cannot drift from the table
-        // if it is ever regenerated.
-        rr_i = base_param_.rr_lut.back();
-        front_i = s * base_param_.delta_f_lut.back();
-      } else {
-        // C++ equivalent of MATLAB interp1(). NOTE: lerp throws
-        // std::invalid_argument if the query is outside base_keys, unlike
-        // interp1 which returns NaN. The k_abs + guard above keeps every
-        // query inside the table's domain.
-        rr_i = autoware::interpolation::lerp(
-          base_param_.k_ref_lut, base_param_.rr_lut, k_abs);
-        front_i = s * autoware::interpolation::lerp(
-          base_param_.k_ref_lut, base_param_.delta_f_lut, k_abs);
-      }
-    } else {
-      // 2WS fallback: identical to stock Autoware. Keeps behaviour unchanged
-      // while enable_4ws is false.
-      front_i = std::atan(base_param_.wheel_base * k_signed);
-      rr_i = 0.0;
+      output.at(i).rear_wheel_angle_rad = 0.0F;
     }
-
-    // Populate the trajectory message. front_wheel_angle_rad was already
-    // written by stock Autoware; rear_wheel_angle_rad was left at 0 and is
-    // read by applyLateralAccelerationFilter's cosine correction.
-    output.at(i).front_wheel_angle_rad = static_cast<float>(front_i);
-    output.at(i).rear_wheel_angle_rad = static_cast<float>(rr_i * front_i);
   }
-
+  
   // --- Step2-2. Steering rate from whichever axle must move further. ---
   // 4WS has two independent actuators; the binding constraint is the larger
   // angular change, not the sum or difference.

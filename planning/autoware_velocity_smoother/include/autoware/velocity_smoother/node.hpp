@@ -27,6 +27,8 @@
 #include "autoware/velocity_smoother/trajectory_utils.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "tf2/utils.hpp"
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <autoware_utils_debug/published_time_publisher.hpp>
 #include <autoware_utils_debug/time_keeper.hpp>
