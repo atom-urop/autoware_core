@@ -19,6 +19,11 @@
 #include "autoware/motion_utils/trajectory/trajectory.hpp"
 #include "autoware/velocity_smoother/trajectory_utils.hpp"
 
+#include "autoware/interpolation/linear_interpolation.hpp"
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <cmath>
+
 #include <autoware_utils_geometry/geometry.hpp>
 
 #include <algorithm>
@@ -135,7 +140,52 @@ TrajectoryPoints resampleTrajectory(
 
   const auto output_traj = autoware::motion_utils::resampleTrajectory(
     autoware::motion_utils::convertToTrajectory(input), out_arclength, false, true, use_zoh_for_v);
+
   auto output = autoware::motion_utils::convertToTrajectoryPointArray(output_traj);
+
+  // Preserve the original trajectory yaw.
+  //
+  // The generic Autoware resampling reconstructs the orientation from
+  // the resampled x/y geometry. For the 4WS path, however, the input
+  // trajectory orientation represents the vehicle body yaw and must be
+  // kept consistent with the steering angles.
+  std::vector<double> input_arclength(input.size(), 0.0);
+
+  for (size_t i = 1; i < input.size(); ++i) {
+    input_arclength.at(i) =
+      input_arclength.at(i - 1) +
+      autoware_utils_geometry::calc_distance2d(input.at(i), input.at(i - 1));
+  }
+
+  // Extract and unwrap the input yaw.
+  std::vector<double> input_yaw(input.size());
+
+  input_yaw.at(0) = tf2::getYaw(input.at(0).pose.orientation);
+
+  for (size_t i = 1; i < input.size(); ++i) {
+    const double current_yaw =
+      tf2::getYaw(input.at(i).pose.orientation);
+
+    const double delta_yaw =
+      std::atan2(
+        std::sin(current_yaw - input_yaw.at(i - 1)),
+        std::cos(current_yaw - input_yaw.at(i - 1)));
+
+    input_yaw.at(i) = input_yaw.at(i - 1) + delta_yaw;
+  }
+
+  // Interpolate the original body yaw at the requested arc lengths.
+  const auto interpolated_yaw =
+    autoware::interpolation::lerp(
+      input_arclength,
+      input_yaw,
+      out_arclength);
+
+  for (size_t i = 0; i < output.size(); ++i) {
+    tf2::Quaternion q;
+    q.setRPY(0.0, 0.0, interpolated_yaw.at(i));
+    output.at(i).pose.orientation = tf2::toMsg(q);
+  }
 
   // add end point directly to consider the endpoint velocity.
   if (is_endpoint_included) {
@@ -259,6 +309,46 @@ TrajectoryPoints resampleTrajectory(
   const auto output_traj = autoware::motion_utils::resampleTrajectory(
     autoware::motion_utils::convertToTrajectory(input), out_arclength, false, true, use_zoh_for_v);
   auto output = autoware::motion_utils::convertToTrajectoryPointArray(output_traj);
+
+  // Preserve the original body yaw after resampling.
+  std::vector<double> input_arclength(input.size(), 0.0);
+
+  for (size_t i = 1; i < input.size(); ++i) {
+    input_arclength.at(i) =
+      input_arclength.at(i - 1) +
+      autoware_utils_geometry::calc_distance2d(input.at(i), input.at(i - 1));
+  }
+
+  std::vector<double> input_yaw(input.size());
+
+  input_yaw.at(0) =
+    tf2::getYaw(input.at(0).pose.orientation);
+
+  for (size_t i = 1; i < input.size(); ++i) {
+    const double current_yaw =
+      tf2::getYaw(input.at(i).pose.orientation);
+
+    const double delta_yaw =
+      std::atan2(
+        std::sin(current_yaw - input_yaw.at(i - 1)),
+        std::cos(current_yaw - input_yaw.at(i - 1)));
+
+    input_yaw.at(i) =
+      input_yaw.at(i - 1) + delta_yaw;
+  }
+
+  const auto interpolated_yaw =
+    autoware::interpolation::lerp(
+      input_arclength,
+      input_yaw,
+      out_arclength);
+
+  for (size_t i = 0; i < output.size(); ++i) {
+    tf2::Quaternion q;
+    q.setRPY(0.0, 0.0, interpolated_yaw.at(i));
+
+    output.at(i).pose.orientation = tf2::toMsg(q);
+  }
 
   // add end point directly to consider the endpoint velocity.
   if (is_endpoint_included) {

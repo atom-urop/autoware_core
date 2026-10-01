@@ -515,18 +515,6 @@ void VelocitySmootherNode::onCurrentTrajectory(const Trajectory::ConstSharedPtr 
     node_param_.ego_nearest_dist_threshold, node_param_.ego_nearest_yaw_threshold,
     node_param_.post_resample_param, false);
 
-
-  if (smoother_->getBaseParam().enable_4ws) {
-    for (auto & point : output_resampled) {
-      const double yaw_mpt = tf2::getYaw(point.pose.orientation);
-      const double yaw_body = yaw_mpt - point.rear_wheel_angle_rad;
-
-      tf2::Quaternion q;
-      q.setRPY(0.0, 0.0, yaw_body);
-      point.pose.orientation = tf2::toMsg(q);
-    }
-  }
-
   // Set 0 at the end of the trajectory
   if (!output_resampled.empty()) {
     output_resampled.back().longitudinal_velocity_mps = 0.0;
@@ -633,12 +621,22 @@ bool VelocitySmootherNode::smoothVelocity(
     return false;  // cannot apply smoothing
   }
 
+  const size_t debug_idx = std::min<size_t>(10, input.size() - 1);
+
+  RCLCPP_WARN(
+    get_logger(),
+    "YAW DEBUG INPUT [%zu]: yaw=%.6f front=%.6f rear=%.6f",
+    debug_idx,
+    tf2::getYaw(input.at(debug_idx).pose.orientation),
+    input.at(debug_idx).front_wheel_angle_rad,
+    input.at(debug_idx).rear_wheel_angle_rad);
+
   // Calculate initial motion for smoothing
   const auto [initial_motion, type] = calcInitialMotion(input, input_closest);
 
   // Lateral acceleration limit
   constexpr bool enable_smooth_limit = true;
-  constexpr bool use_resampling = true;
+  constexpr bool use_resampling = false;
   const auto traj_lateral_acc_filtered =
     node_param_.enable_lateral_acc_limit
       ? smoother_->applyLateralAccelerationFilter(
@@ -650,12 +648,36 @@ bool VelocitySmootherNode::smoothVelocity(
     node_param_.enable_steering_rate_limit
       ? smoother_->applySteeringRateLimit(traj_lateral_acc_filtered, false)
       : traj_lateral_acc_filtered;
+  
+  if (!traj_steering_rate_limited.empty()) {
+    const size_t idx = std::min<size_t>(10, traj_steering_rate_limited.size() - 1);
+
+    RCLCPP_WARN(
+      get_logger(),
+      "YAW DEBUG AFTER STEERING [%zu]: yaw=%.6f front=%.6f rear=%.6f",
+      idx,
+      tf2::getYaw(traj_steering_rate_limited.at(idx).pose.orientation),
+      traj_steering_rate_limited.at(idx).front_wheel_angle_rad,
+      traj_steering_rate_limited.at(idx).rear_wheel_angle_rad);
+  }
 
   // Resample trajectory with ego-velocity based interval distance
   auto traj_resampled = smoother_->resampleTrajectory(
     traj_steering_rate_limited, current_odometry_ptr_->twist.twist.linear.x,
     current_odometry_ptr_->pose.pose, node_param_.ego_nearest_dist_threshold,
     node_param_.ego_nearest_yaw_threshold);
+  
+  if (!traj_resampled.empty()) {
+    const size_t idx = std::min<size_t>(10, traj_resampled.size() - 1);
+
+    RCLCPP_WARN(
+      get_logger(),
+      "YAW DEBUG AFTER RESAMPLE [%zu]: yaw=%.6f front=%.6f rear=%.6f",
+      idx,
+      tf2::getYaw(traj_resampled.at(idx).pose.orientation),
+      traj_resampled.at(idx).front_wheel_angle_rad,
+      traj_resampled.at(idx).rear_wheel_angle_rad);
+  }
 
   const size_t traj_resampled_closest = findNearestIndexFromEgo(traj_resampled);
 
